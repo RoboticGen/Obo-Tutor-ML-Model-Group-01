@@ -1,4 +1,4 @@
-"unstructured[all-docs]"
+unstructured[all-docs]
 pillow
 pydantic
 lxml
@@ -11,16 +11,12 @@ jinja2
 python-multipart
 uvicorn
 tiktoken
-pydantic 
-lxml 
-openai 
-tiktoken 
 opencv-python
 langchain_core
 langchain_openai
-langchain
 chromadb
 langchain-google-genai
 langchain-community
 streamlit
 PyPDF2==3.0.1
+IPython

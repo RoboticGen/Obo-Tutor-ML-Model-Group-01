@@ -135,7 +135,7 @@ def get_summary_of_images(image_elements,output_path, vision_model):
         new_image_path = os.path.join(destination_dir, unique_filename)
         os.rename(image_path, new_image_path)
         #add unique id to image path
-        img_path_list.append(new_image_path)
+        img_path_list.append(unique_filename)
 
     print(image_summaries , "image summaries")
     print(img_base64_list , "image base64 list")
