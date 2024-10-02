@@ -26,6 +26,9 @@ from htmlTemplates import css, bot_template, user_template
 
 from IPython import display
 
+import boto3
+import botocore
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -89,6 +92,29 @@ def encode_image(image_path):
     
 
 
+def upload_to_s3(file_name, bucket, object_name=None):
+    if object_name is None:
+        object_name = file_name
+
+    s3_client = boto3.client('s3')
+    try:
+        response = s3_client.upload_file(file_name, bucket, object_name)
+    except Exception as e:
+        print(e)
+        return False
+   
+    return True
+
+def download_from_s3(bucket, object_name, file_name):
+    s3 = boto3.client('s3')
+    try:
+        s3.download_file(bucket, object_name, file_name)
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == "404":
+            print("The object does not exist.")
+        else:
+            raise
+
 
 
 def summarize_image(encoded_image, vision_model):
@@ -127,15 +153,15 @@ def get_summary_of_images(image_elements,output_path, vision_model):
             image_summaries.append(summary)
 
         image_path = os.path.join(output_path, i)
-        print("rename image path", image_path)
-
-        destination_dir = os.getenv("IMAGE_DIR")
-        os.makedirs(destination_dir, exist_ok=True)
         unique_filename = uuid.uuid4().hex + i
-        new_image_path = os.path.join(destination_dir, unique_filename)
-        os.rename(image_path, new_image_path)
+        upload_to_s3(image_path, os.getenv("BUCKET_NAME"), unique_filename)
+
+        #remove the image from the local directory
+        os.remove(image_path)
+     
+      
         #add unique id to image path
-        img_path_list.append(unique_filename)
+        img_path_list.append("https://obotutor.s3.eu-north-1.amazonaws.com/" + unique_filename)
 
     print(image_summaries , "image summaries")
     print(img_base64_list , "image base64 list")
@@ -280,9 +306,9 @@ def handle_userinput(user_question , chain , vectorstore):
     st.write(bot_template.replace(
         "{{MSG}}", result), unsafe_allow_html=True)
     
-    # Display the relevant images using file paths
+    # Display the relevant images using web URLs
     for img in relevant_images:
-        st.image(img, use_column_width=True)
+        display.Image(url=img)
 
 
 
