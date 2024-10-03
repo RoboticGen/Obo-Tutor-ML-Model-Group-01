@@ -21,3 +21,7 @@ streamlit
 PyPDF2==3.0.1
 IPython
 boto3
+fastapi 
+uvicorn 
+sqlalchemy
+pymysql 
