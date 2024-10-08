@@ -55,6 +55,8 @@ import tempfile
 app = FastAPI()
 
 
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Adjust this to restrict the allowed origins
@@ -177,7 +179,7 @@ def get_summary_of_images(image_elements,output_path, vision_model):
      
       
         #add unique id to image path
-        img_path_list.append("https://obotutor.s3.eu-north-1.amazonaws.com/" + unique_filename)
+        img_path_list.append("https://obotutor-2.s3.eu-north-1.amazonaws.com/" + unique_filename)
 
     print(image_summaries , "image summaries")
     print(img_base64_list , "image base64 list")
