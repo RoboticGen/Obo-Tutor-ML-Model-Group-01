@@ -7,8 +7,9 @@ import uuid
 import base64
 from IPython import display
 from unstructured.partition.pdf import partition_pdf
-from langchain_community.chat_models import ChatOpenAI
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.prompts import PromptTemplate
 from langchain.schema.messages import HumanMessage, SystemMessage
 from langchain.schema.document import Document
@@ -16,11 +17,10 @@ from langchain.retrievers.multi_vector import MultiVectorRetriever
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain.chains import LLMChain
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from openai import OpenAI
 from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
 
@@ -45,6 +45,8 @@ from io import BytesIO
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import tempfile
+import sqlite3
+from datetime import datetime
 
 
 
@@ -66,12 +68,13 @@ app.add_middleware(
 )
 
 
-os.environ['OPENAI_API_KEY']=os.getenv("OPENAI_API_KEY")
+os.environ['GOOGLE_API_KEY']=os.getenv("GOOGLE_API_KEY")
 
-text_model =  ChatOpenAI(
-    model="gpt-4o-mini",
+text_model = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
     temperature=0.5,
     max_tokens=1500,
+    google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
 
@@ -296,6 +299,58 @@ def create_chain(text_model):
     
     return qa_chain
 
+def create_conversation_chain(text_model):
+    """Create a chain for general conversation"""
+    conversation_template = """
+    You are a friendly and helpful tutor assistant. You are designed to help students with their learning and provide educational support.
+    
+    Respond to the user's message in a friendly, encouraging, and educational manner. 
+    If they greet you, greet them back and offer to help with their studies or document questions.
+    If they ask general questions, provide helpful educational responses.
+    
+    User message: {question}
+    
+    Response:
+    """
+    conversation_chain = LLMChain(llm=text_model,
+                                prompt=PromptTemplate.from_template(conversation_template))
+    
+    return conversation_chain
+
+def is_conversational_input(user_input):
+    """Detect if the input is conversational rather than document-related"""
+    conversational_patterns = [
+        'hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',
+        'how are you', 'whats up', "what's up", 'thanks', 'thank you', 'bye', 
+        'goodbye', 'see you', 'nice to meet you', 'how do you do',
+        'can you help me', 'help', 'who are you', 'what can you do',
+        'what are you', 'introduce yourself'
+    ]
+    
+    user_lower = user_input.lower().strip()
+    
+    # Check for exact matches or if the input starts with conversational patterns
+    for pattern in conversational_patterns:
+        if user_lower == pattern or user_lower.startswith(pattern):
+            return True
+    
+    # Check if it's a very short input (likely conversational)
+    if len(user_input.split()) <= 3 and any(word in user_lower for word in ['hi', 'hello', 'hey', 'thanks', 'help']):
+        return True
+        
+    return False
+
+def should_search_documents(user_input):
+    """Determine if the input warrants searching documents"""
+    document_keywords = [
+        'document', 'pdf', 'content', 'about', 'explain', 'describe', 'summary',
+        'what is', 'tell me about', 'information', 'details', 'specification',
+        'requirement', 'feature', 'technical', 'system', 'project', 'proposal'
+    ]
+    
+    user_lower = user_input.lower()
+    return any(keyword in user_lower for keyword in document_keywords)
+
 
 
 def retrieve_content(query,chain,vectorstore):
@@ -317,13 +372,42 @@ def retrieve_content(query,chain,vectorstore):
 
 
 
+def save_document_to_db(filename, file_path):
+    """Save document information to database"""
+    conn = sqlite3.connect("./obotutor.db")
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO documents (filename, file_path, processed)
+        VALUES (?, ?, ?)
+    ''', (filename, file_path, True))
+    
+    document_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return document_id
 
-
+def save_chat_to_db(question, answer, document_id=None):
+    """Save chat interaction to database"""
+    conn = sqlite3.connect("./obotutor.db")
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO chat_history (question, answer, document_id)
+        VALUES (?, ?, ?)
+    ''', (question, answer, document_id))
+    
+    conn.commit()
+    conn.close()
 
 @app.post("/model/upload/")
 async def upload_pdfs(files: List[UploadFile] = File(...)):
     file_path = os.getenv("SAVE_PDF_DIR")
     os.makedirs(file_path, exist_ok=True)
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(os.getenv("OUTPUT_DIR"), exist_ok=True)
+    os.makedirs(os.getenv("VECTOR_DB_DIR"), exist_ok=True)
 
     uploaded_files_info = []
 
@@ -334,83 +418,112 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
             # Read the file content
             pdf_content = await file.read()
 
-
-
             with open(new_file_path, "wb") as f:
                 f.write(pdf_content)
 
+            # Save to database
+            document_id = save_document_to_db(file.filename, new_file_path)
             
             documents = []
             retrieve_contents = []
             vectorstore = None
 
-            text = get_pdf_text( f"{os.getenv('SAVE_PDF_DIR')}/copy_{file.filename}")
+            text = get_pdf_text(new_file_path)
             print("completed reading pdf")
             text_chunks = get_text_chunks(text)
             print("completed splitting text")
             create_documents_text(text_chunks,documents)
             print("completed creating documents")
             
-            
-            img_elements, table_elements = extract_images_and_tables_from_unstructured_pdf(file,os.getenv("OUTPUT_DIR"))
-            print("completed extracting images and tables")
-            vision_model = text_model
-            print("completed vision model")
-            if img_elements:
-                image_summaries,img_base64_list, img_path_list = get_summary_of_images(img_elements,os.getenv("OUTPUT_DIR"),vision_model)
-                print("completed image summaries")
-                create_documents_images(img_base64_list,image_summaries,documents,retrieve_contents, img_path_list)
-                print("completed creating documents images")
+            # Comment out image processing if you don't have S3 bucket
+            # img_elements, table_elements = extract_images_and_tables_from_unstructured_pdf(file,os.getenv("OUTPUT_DIR"))
+            # print("completed extracting images and tables")
+            # vision_model = text_model
+            # print("completed vision model")
+            # if img_elements:
+            #     image_summaries,img_base64_list, img_path_list = get_summary_of_images(img_elements,os.getenv("OUTPUT_DIR"),vision_model)
+            #     print("completed image summaries")
+            #     create_documents_images(img_base64_list,image_summaries,documents,retrieve_contents, img_path_list)
+            #     print("completed creating documents images")
                 
-            # if table_elements:
-            #     table_summaries = get_summary_of_tables(table_elements,text_model)
-            #     create_documents_tables(table_elements,table_summaries,documents,retrieve_contents)
-            
-                
-            embedding_model =  OpenAIEmbeddings(model="text-embedding-3-small")
+            # Use HuggingFace embeddings instead of Gemini to avoid quota issues
+            embedding_model = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
             print("completed embedding model")
             vectorstore = create_vector_store(documents, embedding_model, os.getenv("VECTOR_DB_DIR"))
             print("completed vector store")
-            uploaded_files_info.append(
-              file.filename
-                
-            )
+            uploaded_files_info.append(file.filename)
             print("completed uploading files info")
-          
-
 
         return {"message": "Files uploaded successfully", "files": uploaded_files_info}
 
     except Exception as e:
-        return {"message": f"An error occurred: {e}" , "files": uploaded_files_info}
+        return {"message": f"An error occurred: {e}", "files": uploaded_files_info}
 
-  
-
-# @app.post("/process_pdf/")
-# async def process_pdf(filename: str):
-#     pdf_path = f"/tmp/{filename}"
-    
-#     # Extract text and other contents
-#     pdf_reader = PdfReader(pdf_path)
-#     text = "".join([page.extract_text() for page in pdf_reader.pages])
-    
-#     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-#     text_chunks = text_splitter.split_text(text)
-    
-#     documents = [Document(page_content=chunk) for chunk in text_chunks]
-    
-#     embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
-#     vectorstore = Chroma.from_documents(documents=documents, embedding=embedding_model)
-    
-#     return JSONResponse({"status": "Processed successfully"})
-
-# @app.post("/query/")
-# async def query_document(question: str):
-#     # Vector store retrieval logic
-#     query_result = vectorstore.similarity_search(question)
-#     chain = create_chain(text_model)
-#     result = chain.run({'context': query_result, 'question': question})
-    
-#     return {"result": result}
-
-# Helper functions like create_chain and others can be added as needed.
+@app.post("/model/query/")
+async def query_document(question: str):
+    try:
+        # Check if it's a conversational input
+        if is_conversational_input(question):
+            conversation_chain = create_conversation_chain(text_model)
+            result = conversation_chain.run({'question': question})
+            
+            # Save chat to database
+            save_chat_to_db(question, result)
+            
+            return {
+                "result": result,
+                "relevant_images": [],
+                "type": "conversation"
+            }
+        
+        # Use HuggingFace embeddings instead of Gemini to avoid quota issues
+        embedding_model = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+        
+        # Check if we should search documents
+        if should_search_documents(question):
+            vectorstore = load_vector_store(os.getenv("VECTOR_DB_DIR"), embedding_model)
+            
+            # Check if vectorstore has documents
+            if vectorstore._collection.count() > 0:
+                chain = create_chain(text_model)
+                result, relevant_images = retrieve_content(question, chain, vectorstore)
+                
+                # Save chat to database
+                save_chat_to_db(question, result)
+                
+                return {
+                    "result": result,
+                    "relevant_images": relevant_images,
+                    "type": "document_search"
+                }
+            else:
+                # No documents available
+                conversation_chain = create_conversation_chain(text_model)
+                result = conversation_chain.run({'question': question}) + "\n\nTo get document-specific answers, please upload some PDFs first."
+                
+                save_chat_to_db(question, result)
+                
+                return {
+                    "result": result,
+                    "relevant_images": [],
+                    "type": "conversation"
+                }
+        else:
+            # General conversational response
+            conversation_chain = create_conversation_chain(text_model)
+            result = conversation_chain.run({'question': question})
+            
+            save_chat_to_db(question, result)
+            
+            return {
+                "result": result,
+                "relevant_images": [],
+                "type": "conversation"
+            }
+            
+    except Exception as e:
+        return {"error": f"An error occurred: {e}"}

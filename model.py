@@ -10,10 +10,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.messages import HumanMessage
 from langchain.retrievers.multi_vector import MultiVectorRetriever
 from langchain.storage import InMemoryStore
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_core.documents import Document
 # from langchain_openai import OpenAIEmbeddings
 from IPython.display import HTML, display
@@ -32,7 +33,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-os.environ['OPENAI_API_KEY'] = os.getenv("OPENAI_API_KEY")
+os.environ['GOOGLE_API_KEY'] = os.getenv("GOOGLE_API_KEY")
 
 
 
@@ -58,15 +59,19 @@ def load_vector_store(directory, embedding_model):
 
 
 # text_model = load_model("gemini-pro")
-text_model =  ChatOpenAI(
-    model="gpt-4o",
-    temperature=0
+text_model = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    temperature=0.5,
+    google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
 
-embedding_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+# Use HuggingFace embeddings instead of Gemini to avoid quota issues
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
 
-from langchain_openai import OpenAIEmbeddings
+# from langchain_openai import OpenAIEmbeddings
 # embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
 
 vector_db = load_vector_store(database_path , embedding_model)

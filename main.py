@@ -3,8 +3,9 @@ import uuid
 import base64
 from IPython import display
 from unstructured.partition.pdf import partition_pdf
-from langchain_community.chat_models import ChatOpenAI
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.prompts import PromptTemplate
 from langchain.schema.messages import HumanMessage, SystemMessage
 from langchain.schema.document import Document
@@ -12,11 +13,10 @@ from langchain.retrievers.multi_vector import MultiVectorRetriever
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain.chains import LLMChain
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from openai import OpenAI
 from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
 
@@ -34,12 +34,13 @@ load_dotenv()
 
 
 
-os.environ['OPENAI_API_KEY']=os.getenv("OPENAI_API_KEY")
+os.environ['GOOGLE_API_KEY']=os.getenv("GOOGLE_API_KEY")
 
-text_model =  ChatOpenAI(
-    model="gpt-4o-mini",
+text_model = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
     temperature=0.5,
     max_tokens=1500,
+    google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
 
@@ -278,6 +279,58 @@ def create_chain(text_model):
     
     return qa_chain
 
+def create_conversation_chain(text_model):
+    """Create a chain for general conversation"""
+    conversation_template = """
+    You are a friendly and helpful tutor assistant. You are designed to help students with their learning and provide educational support.
+    
+    Respond to the user's message in a friendly, encouraging, and educational manner. 
+    If they greet you, greet them back and offer to help with their studies or document questions.
+    If they ask general questions, provide helpful educational responses.
+    
+    User message: {question}
+    
+    Response:
+    """
+    conversation_chain = LLMChain(llm=text_model,
+                                prompt=PromptTemplate.from_template(conversation_template))
+    
+    return conversation_chain
+
+def is_conversational_input(user_input):
+    """Detect if the input is conversational rather than document-related"""
+    conversational_patterns = [
+        'hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',
+        'how are you', 'whats up', "what's up", 'thanks', 'thank you', 'bye', 
+        'goodbye', 'see you', 'nice to meet you', 'how do you do',
+        'can you help me', 'help', 'who are you', 'what can you do',
+        'what are you', 'introduce yourself'
+    ]
+    
+    user_lower = user_input.lower().strip()
+    
+    # Check for exact matches or if the input starts with conversational patterns
+    for pattern in conversational_patterns:
+        if user_lower == pattern or user_lower.startswith(pattern):
+            return True
+    
+    # Check if it's a very short input (likely conversational)
+    if len(user_input.split()) <= 3 and any(word in user_lower for word in ['hi', 'hello', 'hey', 'thanks', 'help']):
+        return True
+        
+    return False
+
+def should_search_documents(user_input):
+    """Determine if the input warrants searching documents"""
+    document_keywords = [
+        'document', 'pdf', 'content', 'about', 'explain', 'describe', 'summary',
+        'what is', 'tell me about', 'information', 'details', 'specification',
+        'requirement', 'feature', 'technical', 'system', 'project', 'proposal'
+    ]
+    
+    user_lower = user_input.lower()
+    return any(keyword in user_lower for keyword in document_keywords)
+
 
 
 def retrieve_content(query,chain,vectorstore):
@@ -298,17 +351,46 @@ def retrieve_content(query,chain,vectorstore):
     return result, relevant_images
     
 
-def handle_userinput(user_question , chain , vectorstore):
+def handle_userinput(user_question, chain, vectorstore, text_model):
+    """Handle user input with both conversational and document-based responses"""
     
-    result , relevant_images = retrieve_content(user_question,chain,vectorstore)
-
-
-    st.write(bot_template.replace(
-        "{{MSG}}", result), unsafe_allow_html=True)
+    # Check if it's a conversational input
+    if is_conversational_input(user_question):
+        # Handle with conversation chain
+        conversation_chain = create_conversation_chain(text_model)
+        result = conversation_chain.run({'question': user_question})
+        
+        st.write(bot_template.replace("{{MSG}}", result), unsafe_allow_html=True)
+        
+        # Suggest document-related help if vectorstore has content
+        if vectorstore and vectorstore._collection.count() > 0:
+            suggestion = "\n\n💡 You can also ask me questions about the documents you've uploaded!"
+            st.write(bot_template.replace("{{MSG}}", suggestion), unsafe_allow_html=True)
+        
+        return
     
-    # Display the relevant images using web URLs
-    for img in relevant_images:
-        display.Image(url=img)
+    # Check if we should search documents and if we have the necessary components
+    if should_search_documents(user_question) and vectorstore and chain and vectorstore._collection.count() > 0:
+        # Handle with document search
+        result, relevant_images = retrieve_content(user_question, chain, vectorstore)
+        
+        st.write(bot_template.replace("{{MSG}}", result), unsafe_allow_html=True)
+        
+        # Display the relevant images using web URLs
+        for img in relevant_images:
+            display.Image(url=img)
+    else:
+        # If no documents available or not document-related, use conversational response
+        conversation_chain = create_conversation_chain(text_model)
+        
+        if not vectorstore or vectorstore._collection.count() == 0:
+            # No documents uploaded yet
+            result = conversation_chain.run({'question': user_question}) + "\n\n📚 To get document-specific answers, please upload some PDFs using the sidebar and click 'Process'."
+        else:
+            # General response
+            result = conversation_chain.run({'question': user_question})
+        
+        st.write(bot_template.replace("{{MSG}}", result), unsafe_allow_html=True)
 
 
 
@@ -330,58 +412,76 @@ def main():
     documents = []
     retrieve_contents = []
     vectorstore = None
+    
+    # Initialize embedding model
+    embedding_model = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+    
     with st.sidebar:
         st.subheader("Your documents")
         pdf_docs = st.file_uploader(
             "Upload your PDFs here and click on 'Process'", accept_multiple_files=True , type=["pdf"])
         if st.button("Process"):
-            with st.spinner("Processing"):
-                
-                for pdf_doc in pdf_docs:
-
-                    text = get_pdf_text(pdf_doc)
-                    text_chunks = get_text_chunks(text)
-                    create_documents_text(text_chunks,documents)
+            if pdf_docs:
+                with st.spinner("Processing"):
                     
-                   
-                    img_elements, table_elements = extract_images_and_tables_from_unstructured_pdf(pdf_doc,os.getenv("OUTPUT_DIR"))
-                    vision_model = text_model
-                    if img_elements:
-                        image_summaries,img_base64_list, img_path_list = get_summary_of_images(img_elements,os.getenv("OUTPUT_DIR"),vision_model)
-                        create_documents_images(img_base64_list,image_summaries,documents,retrieve_contents, img_path_list)
+                    for pdf_doc in pdf_docs:
+                        st.write(f"Processing {pdf_doc.name}...")
+
+                        text = get_pdf_text(pdf_doc)
+                        print(f"Extracted text length: {len(text)}")
                         
-                    # if table_elements:
-                    #     table_summaries = get_summary_of_tables(table_elements,text_model)
-                    #     create_documents_tables(table_elements,table_summaries,documents,retrieve_contents)
+                        text_chunks = get_text_chunks(text)
+                        print(f"Created {len(text_chunks)} text chunks")
+                        
+                        create_documents_text(text_chunks,documents)
+                        print(f"Total documents so far: {len(documents)}")
+                        
+                        # Comment out image processing for now to focus on text
+                        # img_elements, table_elements = extract_images_and_tables_from_unstructured_pdf(pdf_doc,os.getenv("OUTPUT_DIR"))
+                        # vision_model = text_model
+                        # if img_elements:
+                        #     image_summaries,img_base64_list, img_path_list = get_summary_of_images(img_elements,os.getenv("OUTPUT_DIR"),vision_model)
+                        #     create_documents_images(img_base64_list,image_summaries,documents,retrieve_contents, img_path_list)
+                            
+                        # if table_elements:
+                        #     table_summaries = get_summary_of_tables(table_elements,text_model)
+                        #     create_documents_tables(table_elements,table_summaries,documents,retrieve_contents)
                     
+                    if documents:
+                        st.write(f"Creating vector store with {len(documents)} documents...")
+                        vectorstore = create_vector_store(documents, embedding_model, os.getenv("VECTOR_DB_DIR"))
+                        st.success("Documents processed successfully")
+                    else:
+                        st.error("No documents were created from the PDFs")
+            else:
+                st.warning("Please upload at least one PDF file")
+
+    # Try to load existing vector store if no new processing happened
+    if not vectorstore:
+        try:
+            vectorstore = load_vector_store(os.getenv("VECTOR_DB_DIR"), embedding_model)
+            # Test if vector store has documents
+            if vectorstore._collection.count() > 0:
+                st.info(f"Loaded existing vector store with {vectorstore._collection.count()} documents")
+            else:
+                st.warning("Vector store is empty. Please upload and process some PDFs first.")
+        except Exception as e:
+            st.warning("No existing vector store found. Please upload and process some PDFs first.")
+            print(f"Error loading vector store: {e}")
+
+    # Handle user questions regardless of vectorstore status
+    if user_question:
+        if vectorstore and vectorstore._collection.count() > 0:
+            chain = create_chain(text_model)
+            handle_userinput(user_question, chain, vectorstore, text_model)
+        else:
+            # No documents available, but still handle conversational input
+            handle_userinput(user_question, None, None, text_model)
+
                         
-                    embedding_model =  OpenAIEmbeddings(model="text-embedding-3-small")
-                    vectorstore = create_vector_store(documents, embedding_model, os.getenv("VECTOR_DB_DIR"))
-                    st.success("Documents processed successfully")
-
-    if vectorstore:
-
-        chain = create_chain(text_model)
-        if user_question:
-            handle_userinput(user_question , chain , vectorstore)
-    else:
-        vectorstore = load_vector_store(os.getenv("VECTOR_DB_DIR"), OpenAIEmbeddings(model="text-embedding-3-small"))
-        chain = create_chain(text_model)
-        if user_question:
-            handle_userinput(user_question , chain , vectorstore)
-
-                        
-
- 
-
-  
-
-
-
-                
-
 
 if __name__ == "__main__":
-
     main()
 

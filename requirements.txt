@@ -4,7 +4,6 @@ pydantic
 lxml
 matplotlib
 langchain
-openai
 python-dotenv
 fastapi
 jinja2
@@ -13,7 +12,6 @@ uvicorn
 tiktoken
 opencv-python
 langchain_core
-langchain_openai
 chromadb
 langchain-google-genai
 langchain-community
@@ -25,4 +23,5 @@ fastapi
 uvicorn 
 sqlalchemy
 pymysql
+sentence-transformers
 

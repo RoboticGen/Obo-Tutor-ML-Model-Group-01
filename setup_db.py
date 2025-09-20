@@ -1,24 +1,8 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
-import os
 import sqlite3
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
-
-
-URL_DATABASE =  os.getenv("URL_DATABASE")
-
-print(URL_DATABASE)
-
-
-engine  =  create_engine(URL_DATABASE)
-
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-Base = declarative_base()
 
 def init_database():
     """Initialize SQLite database with required tables"""
@@ -55,5 +39,3 @@ def init_database():
 
 if __name__ == "__main__":
     init_database()
-
-
