@@ -299,6 +299,58 @@ def create_chain(text_model):
     
     return qa_chain
 
+def create_conversation_chain(text_model):
+    """Create a chain for general conversation"""
+    conversation_template = """
+    You are a friendly and helpful tutor assistant. You are designed to help students with their learning and provide educational support.
+    
+    Respond to the user's message in a friendly, encouraging, and educational manner. 
+    If they greet you, greet them back and offer to help with their studies or document questions.
+    If they ask general questions, provide helpful educational responses.
+    
+    User message: {question}
+    
+    Response:
+    """
+    conversation_chain = LLMChain(llm=text_model,
+                                prompt=PromptTemplate.from_template(conversation_template))
+    
+    return conversation_chain
+
+def is_conversational_input(user_input):
+    """Detect if the input is conversational rather than document-related"""
+    conversational_patterns = [
+        'hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',
+        'how are you', 'whats up', "what's up", 'thanks', 'thank you', 'bye', 
+        'goodbye', 'see you', 'nice to meet you', 'how do you do',
+        'can you help me', 'help', 'who are you', 'what can you do',
+        'what are you', 'introduce yourself'
+    ]
+    
+    user_lower = user_input.lower().strip()
+    
+    # Check for exact matches or if the input starts with conversational patterns
+    for pattern in conversational_patterns:
+        if user_lower == pattern or user_lower.startswith(pattern):
+            return True
+    
+    # Check if it's a very short input (likely conversational)
+    if len(user_input.split()) <= 3 and any(word in user_lower for word in ['hi', 'hello', 'hey', 'thanks', 'help']):
+        return True
+        
+    return False
+
+def should_search_documents(user_input):
+    """Determine if the input warrants searching documents"""
+    document_keywords = [
+        'document', 'pdf', 'content', 'about', 'explain', 'describe', 'summary',
+        'what is', 'tell me about', 'information', 'details', 'specification',
+        'requirement', 'feature', 'technical', 'system', 'project', 'proposal'
+    ]
+    
+    user_lower = user_input.lower()
+    return any(keyword in user_lower for keyword in document_keywords)
+
 
 
 def retrieve_content(query,chain,vectorstore):
@@ -412,21 +464,66 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
 @app.post("/model/query/")
 async def query_document(question: str):
     try:
+        # Check if it's a conversational input
+        if is_conversational_input(question):
+            conversation_chain = create_conversation_chain(text_model)
+            result = conversation_chain.run({'question': question})
+            
+            # Save chat to database
+            save_chat_to_db(question, result)
+            
+            return {
+                "result": result,
+                "relevant_images": [],
+                "type": "conversation"
+            }
+        
         # Use HuggingFace embeddings instead of Gemini to avoid quota issues
         embedding_model = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
-        vectorstore = load_vector_store(os.getenv("VECTOR_DB_DIR"), embedding_model)
-        chain = create_chain(text_model)
         
-        result, relevant_images = retrieve_content(question, chain, vectorstore)
-        
-        # Save chat to database
-        save_chat_to_db(question, result)
-        
-        return {
-            "result": result,
-            "relevant_images": relevant_images
-        }
+        # Check if we should search documents
+        if should_search_documents(question):
+            vectorstore = load_vector_store(os.getenv("VECTOR_DB_DIR"), embedding_model)
+            
+            # Check if vectorstore has documents
+            if vectorstore._collection.count() > 0:
+                chain = create_chain(text_model)
+                result, relevant_images = retrieve_content(question, chain, vectorstore)
+                
+                # Save chat to database
+                save_chat_to_db(question, result)
+                
+                return {
+                    "result": result,
+                    "relevant_images": relevant_images,
+                    "type": "document_search"
+                }
+            else:
+                # No documents available
+                conversation_chain = create_conversation_chain(text_model)
+                result = conversation_chain.run({'question': question}) + "\n\nTo get document-specific answers, please upload some PDFs first."
+                
+                save_chat_to_db(question, result)
+                
+                return {
+                    "result": result,
+                    "relevant_images": [],
+                    "type": "conversation"
+                }
+        else:
+            # General conversational response
+            conversation_chain = create_conversation_chain(text_model)
+            result = conversation_chain.run({'question': question})
+            
+            save_chat_to_db(question, result)
+            
+            return {
+                "result": result,
+                "relevant_images": [],
+                "type": "conversation"
+            }
+            
     except Exception as e:
         return {"error": f"An error occurred: {e}"}

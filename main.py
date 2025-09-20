@@ -279,6 +279,58 @@ def create_chain(text_model):
     
     return qa_chain
 
+def create_conversation_chain(text_model):
+    """Create a chain for general conversation"""
+    conversation_template = """
+    You are a friendly and helpful tutor assistant. You are designed to help students with their learning and provide educational support.
+    
+    Respond to the user's message in a friendly, encouraging, and educational manner. 
+    If they greet you, greet them back and offer to help with their studies or document questions.
+    If they ask general questions, provide helpful educational responses.
+    
+    User message: {question}
+    
+    Response:
+    """
+    conversation_chain = LLMChain(llm=text_model,
+                                prompt=PromptTemplate.from_template(conversation_template))
+    
+    return conversation_chain
+
+def is_conversational_input(user_input):
+    """Detect if the input is conversational rather than document-related"""
+    conversational_patterns = [
+        'hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',
+        'how are you', 'whats up', "what's up", 'thanks', 'thank you', 'bye', 
+        'goodbye', 'see you', 'nice to meet you', 'how do you do',
+        'can you help me', 'help', 'who are you', 'what can you do',
+        'what are you', 'introduce yourself'
+    ]
+    
+    user_lower = user_input.lower().strip()
+    
+    # Check for exact matches or if the input starts with conversational patterns
+    for pattern in conversational_patterns:
+        if user_lower == pattern or user_lower.startswith(pattern):
+            return True
+    
+    # Check if it's a very short input (likely conversational)
+    if len(user_input.split()) <= 3 and any(word in user_lower for word in ['hi', 'hello', 'hey', 'thanks', 'help']):
+        return True
+        
+    return False
+
+def should_search_documents(user_input):
+    """Determine if the input warrants searching documents"""
+    document_keywords = [
+        'document', 'pdf', 'content', 'about', 'explain', 'describe', 'summary',
+        'what is', 'tell me about', 'information', 'details', 'specification',
+        'requirement', 'feature', 'technical', 'system', 'project', 'proposal'
+    ]
+    
+    user_lower = user_input.lower()
+    return any(keyword in user_lower for keyword in document_keywords)
+
 
 
 def retrieve_content(query,chain,vectorstore):
@@ -299,17 +351,46 @@ def retrieve_content(query,chain,vectorstore):
     return result, relevant_images
     
 
-def handle_userinput(user_question , chain , vectorstore):
+def handle_userinput(user_question, chain, vectorstore, text_model):
+    """Handle user input with both conversational and document-based responses"""
     
-    result , relevant_images = retrieve_content(user_question,chain,vectorstore)
-
-
-    st.write(bot_template.replace(
-        "{{MSG}}", result), unsafe_allow_html=True)
+    # Check if it's a conversational input
+    if is_conversational_input(user_question):
+        # Handle with conversation chain
+        conversation_chain = create_conversation_chain(text_model)
+        result = conversation_chain.run({'question': user_question})
+        
+        st.write(bot_template.replace("{{MSG}}", result), unsafe_allow_html=True)
+        
+        # Suggest document-related help if vectorstore has content
+        if vectorstore and vectorstore._collection.count() > 0:
+            suggestion = "\n\n💡 You can also ask me questions about the documents you've uploaded!"
+            st.write(bot_template.replace("{{MSG}}", suggestion), unsafe_allow_html=True)
+        
+        return
     
-    # Display the relevant images using web URLs
-    for img in relevant_images:
-        display.Image(url=img)
+    # Check if we should search documents and if we have the necessary components
+    if should_search_documents(user_question) and vectorstore and chain and vectorstore._collection.count() > 0:
+        # Handle with document search
+        result, relevant_images = retrieve_content(user_question, chain, vectorstore)
+        
+        st.write(bot_template.replace("{{MSG}}", result), unsafe_allow_html=True)
+        
+        # Display the relevant images using web URLs
+        for img in relevant_images:
+            display.Image(url=img)
+    else:
+        # If no documents available or not document-related, use conversational response
+        conversation_chain = create_conversation_chain(text_model)
+        
+        if not vectorstore or vectorstore._collection.count() == 0:
+            # No documents uploaded yet
+            result = conversation_chain.run({'question': user_question}) + "\n\n📚 To get document-specific answers, please upload some PDFs using the sidebar and click 'Process'."
+        else:
+            # General response
+            result = conversation_chain.run({'question': user_question})
+        
+        st.write(bot_template.replace("{{MSG}}", result), unsafe_allow_html=True)
 
 
 
@@ -390,10 +471,14 @@ def main():
             st.warning("No existing vector store found. Please upload and process some PDFs first.")
             print(f"Error loading vector store: {e}")
 
-    if vectorstore and vectorstore._collection.count() > 0:
-        chain = create_chain(text_model)
-        if user_question:
-            handle_userinput(user_question , chain , vectorstore)
+    # Handle user questions regardless of vectorstore status
+    if user_question:
+        if vectorstore and vectorstore._collection.count() > 0:
+            chain = create_chain(text_model)
+            handle_userinput(user_question, chain, vectorstore, text_model)
+        else:
+            # No documents available, but still handle conversational input
+            handle_userinput(user_question, None, None, text_model)
 
                         
 
