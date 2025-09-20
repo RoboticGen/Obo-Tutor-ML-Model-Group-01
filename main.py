@@ -3,8 +3,9 @@ import uuid
 import base64
 from IPython import display
 from unstructured.partition.pdf import partition_pdf
-from langchain_community.chat_models import ChatOpenAI
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.prompts import PromptTemplate
 from langchain.schema.messages import HumanMessage, SystemMessage
 from langchain.schema.document import Document
@@ -12,11 +13,10 @@ from langchain.retrievers.multi_vector import MultiVectorRetriever
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain.chains import LLMChain
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from openai import OpenAI
 from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
 
@@ -34,12 +34,13 @@ load_dotenv()
 
 
 
-os.environ['OPENAI_API_KEY']=os.getenv("OPENAI_API_KEY")
+os.environ['GOOGLE_API_KEY']=os.getenv("GOOGLE_API_KEY")
 
-text_model =  ChatOpenAI(
-    model="gpt-4o-mini",
+text_model = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
     temperature=0.5,
     max_tokens=1500,
+    google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
 
@@ -330,58 +331,72 @@ def main():
     documents = []
     retrieve_contents = []
     vectorstore = None
+    
+    # Initialize embedding model
+    embedding_model = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+    
     with st.sidebar:
         st.subheader("Your documents")
         pdf_docs = st.file_uploader(
             "Upload your PDFs here and click on 'Process'", accept_multiple_files=True , type=["pdf"])
         if st.button("Process"):
-            with st.spinner("Processing"):
-                
-                for pdf_doc in pdf_docs:
-
-                    text = get_pdf_text(pdf_doc)
-                    text_chunks = get_text_chunks(text)
-                    create_documents_text(text_chunks,documents)
+            if pdf_docs:
+                with st.spinner("Processing"):
                     
-                   
-                    img_elements, table_elements = extract_images_and_tables_from_unstructured_pdf(pdf_doc,os.getenv("OUTPUT_DIR"))
-                    vision_model = text_model
-                    if img_elements:
-                        image_summaries,img_base64_list, img_path_list = get_summary_of_images(img_elements,os.getenv("OUTPUT_DIR"),vision_model)
-                        create_documents_images(img_base64_list,image_summaries,documents,retrieve_contents, img_path_list)
+                    for pdf_doc in pdf_docs:
+                        st.write(f"Processing {pdf_doc.name}...")
+
+                        text = get_pdf_text(pdf_doc)
+                        print(f"Extracted text length: {len(text)}")
                         
-                    # if table_elements:
-                    #     table_summaries = get_summary_of_tables(table_elements,text_model)
-                    #     create_documents_tables(table_elements,table_summaries,documents,retrieve_contents)
+                        text_chunks = get_text_chunks(text)
+                        print(f"Created {len(text_chunks)} text chunks")
+                        
+                        create_documents_text(text_chunks,documents)
+                        print(f"Total documents so far: {len(documents)}")
+                        
+                        # Comment out image processing for now to focus on text
+                        # img_elements, table_elements = extract_images_and_tables_from_unstructured_pdf(pdf_doc,os.getenv("OUTPUT_DIR"))
+                        # vision_model = text_model
+                        # if img_elements:
+                        #     image_summaries,img_base64_list, img_path_list = get_summary_of_images(img_elements,os.getenv("OUTPUT_DIR"),vision_model)
+                        #     create_documents_images(img_base64_list,image_summaries,documents,retrieve_contents, img_path_list)
+                            
+                        # if table_elements:
+                        #     table_summaries = get_summary_of_tables(table_elements,text_model)
+                        #     create_documents_tables(table_elements,table_summaries,documents,retrieve_contents)
                     
-                        
-                    embedding_model =  OpenAIEmbeddings(model="text-embedding-3-small")
-                    vectorstore = create_vector_store(documents, embedding_model, os.getenv("VECTOR_DB_DIR"))
-                    st.success("Documents processed successfully")
+                    if documents:
+                        st.write(f"Creating vector store with {len(documents)} documents...")
+                        vectorstore = create_vector_store(documents, embedding_model, os.getenv("VECTOR_DB_DIR"))
+                        st.success("Documents processed successfully")
+                    else:
+                        st.error("No documents were created from the PDFs")
+            else:
+                st.warning("Please upload at least one PDF file")
 
-    if vectorstore:
+    # Try to load existing vector store if no new processing happened
+    if not vectorstore:
+        try:
+            vectorstore = load_vector_store(os.getenv("VECTOR_DB_DIR"), embedding_model)
+            # Test if vector store has documents
+            if vectorstore._collection.count() > 0:
+                st.info(f"Loaded existing vector store with {vectorstore._collection.count()} documents")
+            else:
+                st.warning("Vector store is empty. Please upload and process some PDFs first.")
+        except Exception as e:
+            st.warning("No existing vector store found. Please upload and process some PDFs first.")
+            print(f"Error loading vector store: {e}")
 
+    if vectorstore and vectorstore._collection.count() > 0:
         chain = create_chain(text_model)
         if user_question:
             handle_userinput(user_question , chain , vectorstore)
-    else:
-        vectorstore = load_vector_store(os.getenv("VECTOR_DB_DIR"), OpenAIEmbeddings(model="text-embedding-3-small"))
-        chain = create_chain(text_model)
-        if user_question:
-            handle_userinput(user_question , chain , vectorstore)
 
                         
-
- 
-
-  
-
-
-
-                
-
 
 if __name__ == "__main__":
-
     main()
 
