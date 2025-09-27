@@ -18,7 +18,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_chroma import Chroma
-from langchain.chains import LLMChain
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
@@ -38,6 +37,34 @@ load_dotenv()
 
 
 from io import BytesIO
+
+
+# Global System Configuration for OboTutor
+OBOTUTOR_SYSTEM_CONFIG = {
+    "name": "OboTutor",
+    "role": "AI Tutor Assistant",
+    "core_mission": "Help students learn effectively and achieve academic success",
+    "personality_traits": [
+        "Patient and encouraging",
+        "Knowledgeable and adaptive", 
+        "Supportive and professional",
+        "Clear and educational"
+    ],
+    "key_capabilities": [
+        "Document analysis (PDFs, images, tables)",
+        "Step-by-step explanations",
+        "Homework and project assistance", 
+        "Exam preparation support",
+        "Adaptive teaching methods"
+    ],
+    "teaching_principles": [
+        "Break down complex topics into manageable parts",
+        "Use examples and analogies for clarity",
+        "Encourage active learning and critical thinking",
+        "Provide context and real-world connections",
+        "Maintain supportive tone throughout"
+    ]
+}
 
 
 
@@ -71,7 +98,7 @@ app.add_middleware(
 os.environ['GOOGLE_API_KEY']=os.getenv("GOOGLE_API_KEY")
 
 text_model = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
+    model="gemini-2.5-flash",
     temperature=0.5,
     max_tokens=1500,
     google_api_key=os.getenv("GOOGLE_API_KEY")
@@ -285,35 +312,73 @@ def load_vector_store(directory, embedding_model):
 
 #create chain
 def create_chain(text_model):
-    prompt_template = """
-    You are a tutor assistant. You aims to provide personalized instruction, guided problem-solving, and adaptive teaching to cater to each student's unique needs and learning pace.
-    Answer the question based only on the following context, which can include text, images and tables:
-    {context}
-    Question: {question}
-    Don't answer if you have no context and decline to answer and say "Sorry, I don't have much information about it."
-    Just return the helpful answer in as much as detailed possible.
-    Answer:
-    """
-    qa_chain = LLMChain(llm=text_model,
-                        prompt=PromptTemplate.from_template(prompt_template))
+    prompt_template = """You are OboTutor, an AI tutor that helps students learn effectively. 
+
+PERSONALITY:
+- Be conversational and natural - no formal greetings like "Hello there!"
+- Jump straight into answering questions without mentioning "documents" or "context"
+- Be encouraging but not overly enthusiastic
+- Keep explanations clear and easy to follow
+
+RESPONSE STYLE:
+- Answer questions directly without preambles
+- Don't mention "based on the documents" or "from the context provided"
+- Use "you" and "your" to make it personal
+- Include examples and analogies when they help explain concepts
+- Break down complex ideas into simple steps
+
+GUIDELINES:
+- Only use information from the provided context
+- If you can't answer from the context, say: "I don't have enough information about that topic. Could you share more details or upload relevant materials?"
+- Ask follow-up questions when they would help the student learn
+- Suggest practical applications when relevant
+
+CONTEXT: {context}
+
+QUESTION: {question}
+
+Answer the question naturally and conversationally:"""
+    
+    prompt = PromptTemplate.from_template(prompt_template)
+    qa_chain = prompt | text_model | StrOutputParser()
     
     return qa_chain
 
 def create_conversation_chain(text_model):
     """Create a chain for general conversation"""
-    conversation_template = """
-    You are a friendly and helpful tutor assistant. You are designed to help students with their learning and provide educational support.
-    
-    Respond to the user's message in a friendly, encouraging, and educational manner. 
-    If they greet you, greet them back and offer to help with their studies or document questions.
-    If they ask general questions, provide helpful educational responses.
-    
-    User message: {question}
-    
-    Response:
-    """
-    conversation_chain = LLMChain(llm=text_model,
-                                prompt=PromptTemplate.from_template(conversation_template))
+    conversation_template = """You are OboTutor, a friendly AI tutor who helps students with their learning.
+
+PERSONALITY:
+- Be casual and conversational - no formal greetings 
+- Jump right into helping without lengthy introductions
+- Be encouraging and supportive
+- Keep things simple and clear
+
+CONVERSATION STYLE:
+- Respond naturally like you're chatting with a student
+- When students greet you, respond warmly and ask how you can help
+- For questions, give direct helpful answers
+- If students seem stuck, offer encouragement and different approaches
+- Ask follow-up questions to better understand their needs
+
+WHAT YOU CAN HELP WITH:
+- Analyzing documents and materials they upload
+- Explaining concepts step by step
+- Helping with homework and projects
+- Exam preparation
+- Study strategies
+
+TONE:
+- Friendly and approachable
+- Patient and understanding
+- Positive and motivating
+- Clear and helpful
+
+Student: {question}
+
+Response:"""
+    prompt = PromptTemplate.from_template(conversation_template)
+    conversation_chain = prompt | text_model | StrOutputParser()
     
     return conversation_chain
 
@@ -366,7 +431,7 @@ def retrieve_content(query,chain,vectorstore):
         elif d.metadata['type'] == 'image':
             context += '[image]' + d.page_content
             relevant_images.append(d.metadata['original_content'])
-    result = chain.run({'context': context, 'question': query})
+    result = chain.invoke({'context': context, 'question': query})
     print(relevant_images , "relevant images")
     return result, relevant_images
 
@@ -462,12 +527,29 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
         return {"message": f"An error occurred: {e}", "files": uploaded_files_info}
 
 @app.post("/model/query/")
-async def query_document(question: str):
+async def query_document(request: dict):
     try:
+        # Extract parameters from request
+        question = request.get("question", "")
+        chat_history = request.get("chat_history", "")
+        chatbox_id = request.get("chatbox_id")
+        
+        if not question:
+            return {"error": "Question is required"}
+        
+        # If we have chat history, include it in the context
+        enhanced_question = question
+        if chat_history:
+            enhanced_question = f"""Previous conversation:
+{chat_history}
+
+Current question: {question}
+
+Please consider the conversation context when answering. If the question refers to something mentioned earlier (like "the project", "it", "this"), use that context to provide a relevant answer."""
         # Check if it's a conversational input
-        if is_conversational_input(question):
+        if is_conversational_input(enhanced_question):
             conversation_chain = create_conversation_chain(text_model)
-            result = conversation_chain.run({'question': question})
+            result = conversation_chain.invoke({'question': enhanced_question})
             
             # Save chat to database
             save_chat_to_db(question, result)
@@ -475,7 +557,8 @@ async def query_document(question: str):
             return {
                 "result": result,
                 "relevant_images": [],
-                "type": "conversation"
+                "type": "conversation",
+                "context_used": len(chat_history) > 0
             }
         
         # Use HuggingFace embeddings instead of Gemini to avoid quota issues
@@ -483,14 +566,14 @@ async def query_document(question: str):
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
         
-        # Check if we should search documents
-        if should_search_documents(question):
+        # Check if it's document-specific or should search documents
+        if should_search_documents(enhanced_question):
             vectorstore = load_vector_store(os.getenv("VECTOR_DB_DIR"), embedding_model)
             
             # Check if vectorstore has documents
             if vectorstore._collection.count() > 0:
                 chain = create_chain(text_model)
-                result, relevant_images = retrieve_content(question, chain, vectorstore)
+                result, relevant_images = retrieve_content(enhanced_question, chain, vectorstore)
                 
                 # Save chat to database
                 save_chat_to_db(question, result)
@@ -498,31 +581,34 @@ async def query_document(question: str):
                 return {
                     "result": result,
                     "relevant_images": relevant_images,
-                    "type": "document_search"
+                    "type": "document-based",
+                    "context_used": len(chat_history) > 0
                 }
             else:
                 # No documents available
                 conversation_chain = create_conversation_chain(text_model)
-                result = conversation_chain.run({'question': question}) + "\n\nTo get document-specific answers, please upload some PDFs first."
+                result = conversation_chain.invoke({'question': enhanced_question}) + "\n\nTo get document-specific answers, please upload some PDFs first."
                 
                 save_chat_to_db(question, result)
                 
                 return {
                     "result": result,
                     "relevant_images": [],
-                    "type": "conversation"
+                    "type": "conversation",
+                    "context_used": len(chat_history) > 0
                 }
         else:
             # General conversational response
             conversation_chain = create_conversation_chain(text_model)
-            result = conversation_chain.run({'question': question})
+            result = conversation_chain.invoke({'question': enhanced_question})
             
             save_chat_to_db(question, result)
             
             return {
                 "result": result,
                 "relevant_images": [],
-                "type": "conversation"
+                "type": "conversation",
+                "context_used": len(chat_history) > 0
             }
             
     except Exception as e:
